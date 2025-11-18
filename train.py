@@ -23,13 +23,13 @@ from agent import DQN, ReplayBuffer, select_action
 from utils import preprocess, plot_rewards, create_video_writer, MarioViewer
 
 # --- Hyperparameters ---
-EPISODES = 20
+EPISODES = 5
 MAX_STEPS = 5000
 FRAME_STACK_SIZE = 4
 GAMMA = 0.99
-LR = 1e-4
+LR = 0.1 #e-4
 BATCH_SIZE = 32
-EPS_START = 1.0
+EPS_START = 0.5
 EPS_END = 0.05  # Lower epsilon end for more exploitation of learned behavior
 EPS_DECAY = 0.995  # Slower decay to explore longer (find high jump strategy)
 TARGET_UPDATE = 10
@@ -37,6 +37,7 @@ MEMORY_SIZE = 100_000
 SAVE_PATH = "checkpoints/dqn_mario.pt"
 VIDEO_PATH = "assets/mario_training.mp4"
 REWARD_PLOT_PATH = "assets/reward_plot.png"
+BEST_REWARD_PATH = "assets/reward.best"
 
 # --- Reward/Training Controls ---
 STUCK_THRESHOLD = 150
@@ -77,18 +78,37 @@ target_net.load_state_dict(policy_net.state_dict())
 optimizer = torch.optim.Adam(policy_net.parameters(), lr=LR)
 memory = ReplayBuffer(MEMORY_SIZE, device)
 
+
+best_reward = float('-inf')
+
 # --- Resume from Checkpoint ---
 latest_best_model = get_latest_model("checkpoints/best_model_*.pt")
 if latest_best_model:
     print(f"📦 Resuming training from latest best model: {latest_best_model}")
     policy_net.load_state_dict(torch.load(latest_best_model, map_location=device))
     target_net.load_state_dict(policy_net.state_dict())
+    try:
+        score_file = open(BEST_REWARD_PATH, "r")
+        best_reward = float(score_file.read())
+        score_file.close()
+        print(f"Using the previously saved best reward: {best_reward}")
+    except Exception as e:
+        print(f"Using default score {best_reward}")
+    
 elif os.path.exists(SAVE_PATH):
     print(f"📦 Resuming training from {SAVE_PATH}")
     policy_net.load_state_dict(torch.load(SAVE_PATH, map_location=device))
     target_net.load_state_dict(policy_net.state_dict())
+    try:
+        score_file = open(BEST_REWARD_PATH, "r")
+        best_reward = float(score_file.read())
+        score_file.close()
+        print(f"Using the previously saved best reward: {best_reward}")
+    except Exception as e:
+        print(f"Using default score {best_reward}")
 else:
     print("🚀 Starting fresh training — no checkpoint found")
+    print(f"Using the previously saved best reward: {best_reward}")
 
 # --- Video Writer ---
 try:
@@ -119,17 +139,13 @@ max_air_chain_history = []
 loss_history = []
 epsilon_history = []
 stuck_termination_history = []
-best_reward = float('-inf')
 
 for episode in range(EPISODES):
     start_time = time.time()
     obs, info = env.reset()
-    state = preprocess(obs)
-    
-    # Initialize a deque for stacking frames
-    state_stack = deque([state] * FRAME_STACK_SIZE, maxlen=FRAME_STACK_SIZE)
-    state = np.array(state_stack)
-    
+    initial_frame = preprocess(obs)
+    state_stack = deque([initial_frame] * FRAME_STACK_SIZE, maxlen=FRAME_STACK_SIZE)
+    state = np.array(state_stack, dtype=np.float32)
     total_reward = 0
     prev_x = info.get('x_pos', 40)
     prev_score = info.get('score', 0)
@@ -207,10 +223,9 @@ for episode in range(EPISODES):
         
         action = select_action(state, policy_net, exploration_epsilon, env, device, encourage_high_jump=encourage_jump)
         next_obs, reward, terminated, truncated, info = env.step(action)
-        next_state = preprocess(next_obs)
-        state_stack.append(next_state)
-        next_state = np.array(state_stack)
-        
+        next_frame = preprocess(next_obs)
+        state_stack.append(next_frame)
+        next_state = np.array(state_stack, dtype=np.float32)
         done = terminated or truncated
 
         # --- Reward Shaping ---
@@ -280,11 +295,11 @@ for episode in range(EPISODES):
                 jump_bonus = 10.0  # Higher when approaching obstacle
             last_jump_action = 2
         elif action == 4:  # HIGH JUMP (right + A + B) - THIS IS KEY!
-            jump_bonus = 10.0  # ALWAYS reward high jump significantly
+            jump_bonus = 50.0  # ALWAYS reward high jump significantly
             if approaching_obstacle:
-                jump_bonus = 20.0  # Very high when approaching obstacle
+                jump_bonus *= 2.0 #= 20.0  # Very high when approaching obstacle
             if is_stuck_for_reward:
-                jump_bonus = 25.0  # Maximum when stuck
+                jump_bonus *= 5.0  # Maximum when stuck
             last_jump_action = 4
             high_jump_count += 1
             if step % 20 == 0:  # Print occasionally
@@ -323,15 +338,16 @@ for episode in range(EPISODES):
             post_jump_progress_bonus = x_progress * multiplier
             if last_jump_action == 4 and x_progress > 2:
                 post_jump_progress_bonus += 10.0  # Extra for clearing obstacle with high jump
-                print(f"✅ Progress after HIGH JUMP: {x_progress:.1f}, Bonus: {post_jump_progress_bonus:.1f}")
+                print(f"✅ Progress after HIGH JUMP: {x_progress:.1f}, Bonus: {post_jump_progress_bonus:.1f}, pure_progress: {info.get('x_pos', 40)}")
         
         # 5. PROGRESS & SPEED REWARD (favor fast forward motion)
-        progress_reward = forward_velocity * 2.5  # Stronger weight for moving forward
-        sprint_bonus = 0.0
-        if forward_velocity >= 3.0:
-            sprint_bonus = 5.0  # Extra reward for rapid movement
-        elif forward_velocity >= 1.0:
-            sprint_bonus = 2.0
+        progress_reward = forward_velocity * forward_velocity #* 2.5  # Stronger weight for moving forward
+        #print(f"forward_velocity = {forward_velocity}")
+        #sprint_bonus = 0.0
+        #if forward_velocity >= 3.0:
+        #    sprint_bonus = 5.0  # Extra reward for rapid movement
+        #elif forward_velocity >= 1.0:
+        #    sprint_bonus = 2.0
         speed_chain_bonus = speed_chain * 0.4  # Encourage sustained progress
         slow_penalty = 0.0
         if no_progress_steps > SLOW_PENALTY_DELAY and is_at_ground:
@@ -368,11 +384,16 @@ for episode in range(EPISODES):
         
         # 9. SURVIVAL BONUS (small reward for staying alive)
         survival_bonus = 0.1 if x_progress > 0 else 0.0
+
+        #10. PURE PROGRESSMENT BONUS
+        pure_progress_bonus = 0.0
+        if x_progress > 0:
+            pure_progress_bonus = 0.5 * info.get("x_pos",40)
         
         # Combine all rewards
         shaped_reward = (reward + 
                 progress_reward + 
-                sprint_bonus + 
+                #sprint_bonus + 
                 speed_chain_bonus + 
                 slow_penalty + 
                         0.05 * score_gain + 
@@ -385,15 +406,21 @@ for episode in range(EPISODES):
                         obstacle_clear_bonus + 
                         unstuck_bonus + 
                         preventive_jump_bonus + 
-                        survival_bonus)
+                        survival_bonus +
+                pure_progress_bonus
+                )
+
+        #print(f"shaped rewared = {shaped_reward}")
+
+
 
         # --- Death Penalty ---
         if terminated:
-            shaped_reward -= 50.0
+            shaped_reward -= 500.0
         
         # --- Stuck Penalty (escalating penalty the longer stuck) ---
         stuck_penalty = 0.0
-        if stuck_counter > 50:  # Start penalizing earlier (after 50 steps)
+        if stuck_counter > 5:  # Start penalizing earlier (after 50 steps)
             # Escalating penalty: -3.0 per 50 steps stuck (more aggressive)
             stuck_penalty = -(stuck_counter // 50) * 3.0
             shaped_reward += stuck_penalty
@@ -488,6 +515,12 @@ for episode in range(EPISODES):
         best_model_path = f"checkpoints/best_model_{timestamp}.pt"
         torch.save(policy_net.state_dict(), best_model_path)
         print(f"💾 New best model saved: {best_model_path} with reward {best_reward:.2f}")
+        try:
+            with open(BEST_REWARD_PATH, "w") as reward_file:
+                reward_file.write(str(best_reward))
+        except Exception as e:
+            print(f"⚠️  Could not write best score to file: {e}")
+            
 
     # --- Epsilon Decay ---
     epsilon_history.append(epsilon)

@@ -112,3 +112,8 @@ Welcome to the UNI-Vaasa Applied ML / Group20 "RL-Mario" project. This document 
 - If you do not need real-time visualization, set `SHOW_VISUAL = False` to avoid pygame overhead or crashes on headless servers.
 
 With this guide, newcomers can quickly identify where core logic lives, how files interact, and which knobs to turn when experimenting with the Mario agent. Happy training!
+
+## Update Log
+- **18/11/2025 – AnssiO**
+  - Restored 4-frame stacking in `train.py` (imports, `FRAME_STACK_SIZE = 4`, deque-based state buffer) so states are again presented as 4-channel tensors, keeping the current DQN weights and checkpoints compatible without retraining. `eval.py` already used the same structure, so no changes were necessary there.
+  - Fixed the high-jump progress log f-string by switching the inner quotes to single quotes, resolving the syntax error that previously halted training.

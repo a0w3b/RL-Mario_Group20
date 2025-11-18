@@ -42,3 +42,5 @@ Thumbs.db
 GUIDE.md
 EHDOTUKSET.md
 *.pdf
+/OLD
+/checkpoints
