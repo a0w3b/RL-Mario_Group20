@@ -1,3 +1,5 @@
+"""UNI-Vaasa, Applied ML / Group20 Project work: RL-Mario — Agent script."""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
