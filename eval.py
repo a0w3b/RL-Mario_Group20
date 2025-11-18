@@ -7,6 +7,7 @@ import time
 import numpy as np
 import os
 import glob
+from collections import deque
 
 from agent import DQN
 from utils import preprocess, create_video_writer, MarioViewer
@@ -16,6 +17,7 @@ MODEL_PATH = "checkpoints/dqn_mario.pt"
 VIDEO_PATH = "assets/mario_eval.mp4"
 NUM_EVAL_EPISODES = 10
 MAX_STEPS = 5000
+FRAME_STACK_SIZE = 4
 
 # --- Display Settings ---
 SHOW_VISUAL = True  # Set to True to show the game window
@@ -73,6 +75,8 @@ x_positions = []
 for ep in range(NUM_EVAL_EPISODES):
     obs, info = env.reset()
     state = preprocess(obs)
+    state_stack = deque([state] * FRAME_STACK_SIZE, maxlen=FRAME_STACK_SIZE)
+    state = np.array(state_stack)
     total_reward = 0
     prev_x = info.get('x_pos', 40)
 
@@ -101,13 +105,14 @@ for ep in range(NUM_EVAL_EPISODES):
                 video_enabled = False
 
         with torch.no_grad():
-            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
             q_values = policy_net(state_tensor)
             action = q_values.argmax().item()
 
         next_obs, reward, terminated, truncated, info = env.step(action)
         next_state = preprocess(next_obs)
-        state = next_state
+        state_stack.append(next_state)
+        state = np.array(state_stack)
         total_reward += reward
         prev_x = info.get('x_pos', prev_x)
 

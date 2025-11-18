@@ -16,6 +16,8 @@ import cv2
 import glob
 from datetime import datetime
 from math import ceil
+from collections import deque
+import numpy as np
 
 from agent import DQN, ReplayBuffer, select_action
 from utils import preprocess, plot_rewards, create_video_writer, MarioViewer
@@ -23,6 +25,7 @@ from utils import preprocess, plot_rewards, create_video_writer, MarioViewer
 # --- Hyperparameters ---
 EPISODES = 20
 MAX_STEPS = 5000
+FRAME_STACK_SIZE = 4
 GAMMA = 0.99
 LR = 1e-4
 BATCH_SIZE = 32
@@ -122,6 +125,11 @@ for episode in range(EPISODES):
     start_time = time.time()
     obs, info = env.reset()
     state = preprocess(obs)
+    
+    # Initialize a deque for stacking frames
+    state_stack = deque([state] * FRAME_STACK_SIZE, maxlen=FRAME_STACK_SIZE)
+    state = np.array(state_stack)
+    
     total_reward = 0
     prev_x = info.get('x_pos', 40)
     prev_score = info.get('score', 0)
@@ -200,6 +208,9 @@ for episode in range(EPISODES):
         action = select_action(state, policy_net, exploration_epsilon, env, device, encourage_high_jump=encourage_jump)
         next_obs, reward, terminated, truncated, info = env.step(action)
         next_state = preprocess(next_obs)
+        state_stack.append(next_state)
+        next_state = np.array(state_stack)
+        
         done = terminated or truncated
 
         # --- Reward Shaping ---

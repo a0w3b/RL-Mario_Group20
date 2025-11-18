@@ -10,7 +10,7 @@ class DQN(nn.Module):
     def __init__(self, n_actions):
         super(DQN, self).__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=8, stride=4),
+            nn.Conv2d(4, 32, kernel_size=8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
@@ -38,10 +38,10 @@ class ReplayBuffer:
         batch = random.sample(self.buffer, batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
         return (
-            torch.tensor(np.array(states), dtype=torch.float32).unsqueeze(1).to(self.device),
+            torch.tensor(np.array(states), dtype=torch.float32).to(self.device),
             torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(self.device),
             torch.tensor(rewards, dtype=torch.float32).to(self.device),
-            torch.tensor(np.array(next_states), dtype=torch.float32).unsqueeze(1).to(self.device),
+            torch.tensor(np.array(next_states), dtype=torch.float32).to(self.device),
             torch.tensor(dones, dtype=torch.float32).to(self.device)
         )
 
@@ -77,6 +77,6 @@ def select_action(state, policy_net, epsilon, env, device, encourage_high_jump=F
             return 4
         return env.action_space.sample()
     with torch.no_grad():
-        state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
         q_values = policy_net(state_tensor)
         return q_values.argmax().item()

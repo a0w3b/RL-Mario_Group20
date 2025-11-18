@@ -37,3 +37,8 @@ outputs/*.mp4
 # System files
 .DS_Store
 Thumbs.db
+
+# Generated files and folders
+GUIDE.md
+EHDOTUKSET.md
+*.pdf
