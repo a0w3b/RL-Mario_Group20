@@ -14,6 +14,7 @@ import time
 import os
 import cv2
 import glob
+import csv
 from datetime import datetime
 from math import ceil
 from collections import deque
@@ -23,13 +24,13 @@ from agent import DQN, ReplayBuffer, select_action
 from utils import preprocess, plot_rewards, create_video_writer, MarioViewer
 
 # --- Hyperparameters ---
-EPISODES = 5
+EPISODES = 30
 MAX_STEPS = 5000
 FRAME_STACK_SIZE = 4
 GAMMA = 0.99
-LR = 0.1 #e-4
+LR = 0.01 #1e-4
 BATCH_SIZE = 32
-EPS_START = 0.5
+EPS_START = 1.0 #1.0
 EPS_END = 0.05  # Lower epsilon end for more exploitation of learned behavior
 EPS_DECAY = 0.995  # Slower decay to explore longer (find high jump strategy)
 TARGET_UPDATE = 10
@@ -38,6 +39,20 @@ SAVE_PATH = "checkpoints/dqn_mario.pt"
 VIDEO_PATH = "assets/mario_training.mp4"
 REWARD_PLOT_PATH = "assets/reward_plot.png"
 BEST_REWARD_PATH = "assets/reward.best"
+METRICS_CSV_PATH = "assets/reward_metrics.csv"
+METRIC_STEP_LOG_INTERVAL = 100  # Print step-level metrics every N environment steps
+STUCK_METRIC_LOG_INTERVAL = 20  # Print more often when agent is stuck
+
+METRIC_CSV_HEADERS = [
+    "episode",
+    "total_reward",
+    "avg_reward_per_step",
+    "forward_progress",
+    "avg_speed",
+    "avg_loss",
+    "epsilon",
+    "stuck_termination",
+]
 
 # --- Reward/Training Controls ---
 STUCK_THRESHOLD = 150
@@ -50,7 +65,7 @@ GRAD_CLIP_NORM = 5.0
 VERBOSE = True
 
 # --- Display Settings ---
-SHOW_VISUAL = True  # Set to True to show the game window
+SHOW_VISUAL = False  # Set to True to show the game window
 DISPLAY_SCALE = 2   # Scale factor for the display (3x larger)
 DISPLAY_FPS = 30    # Frames per second for display
 
@@ -65,6 +80,30 @@ def get_latest_model(path_pattern):
         return None
     return max(model_files, key=os.path.getctime)
 
+
+def init_metrics_history():
+    return {
+        "reward": [],
+        "forward_progress": [],
+        "avg_speed": [],
+        "air_steps": [],
+        "high_jumps": [],
+        "max_air_chain": [],
+        "avg_loss": [],
+        "epsilon": [],
+        "stuck_termination": [],
+    }
+
+
+def append_metrics_csv(record, csv_path=METRICS_CSV_PATH):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    file_exists = os.path.exists(csv_path)
+    with open(csv_path, "a", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=METRIC_CSV_HEADERS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(record)
+
 # --- Environment Setup ---
 env = gym.make('SuperMarioBros-v0', apply_api_compatibility=True, render_mode="rgb_array")
 env = JoypadSpace(env, RIGHT_ONLY)
@@ -78,8 +117,8 @@ target_net.load_state_dict(policy_net.state_dict())
 optimizer = torch.optim.Adam(policy_net.parameters(), lr=LR)
 memory = ReplayBuffer(MEMORY_SIZE, device)
 
-
 best_reward = float('-inf')
+
 
 # --- Resume from Checkpoint ---
 latest_best_model = get_latest_model("checkpoints/best_model_*.pt")
@@ -94,7 +133,6 @@ if latest_best_model:
         print(f"Using the previously saved best reward: {best_reward}")
     except Exception as e:
         print(f"Using default score {best_reward}")
-    
 elif os.path.exists(SAVE_PATH):
     print(f"📦 Resuming training from {SAVE_PATH}")
     policy_net.load_state_dict(torch.load(SAVE_PATH, map_location=device))
@@ -108,7 +146,7 @@ elif os.path.exists(SAVE_PATH):
         print(f"Using default score {best_reward}")
 else:
     print("🚀 Starting fresh training — no checkpoint found")
-    print(f"Using the previously saved best reward: {best_reward}")
+    print(f"Using default score {best_reward}")
 
 # --- Video Writer ---
 try:
@@ -130,25 +168,22 @@ else:
 
 # --- Training Loop ---
 epsilon = EPS_START
-reward_history = []
-forward_progress_history = []
-avg_speed_history = []
-air_steps_history = []
-high_jump_history = []
-max_air_chain_history = []
-loss_history = []
-epsilon_history = []
-stuck_termination_history = []
+metrics_history = init_metrics_history()
+prev_life = 2
 
 for episode in range(EPISODES):
     start_time = time.time()
     obs, info = env.reset()
-    initial_frame = preprocess(obs)
-    state_stack = deque([initial_frame] * FRAME_STACK_SIZE, maxlen=FRAME_STACK_SIZE)
-    state = np.array(state_stack, dtype=np.float32)
+    state = preprocess(obs)
+    
+    # Initialize a deque for stacking frames
+    state_stack = deque([state] * FRAME_STACK_SIZE, maxlen=FRAME_STACK_SIZE)
+    state = np.array(state_stack)
+    
     total_reward = 0
     prev_x = info.get('x_pos', 40)
-    prev_score = info.get('score', 0)
+    prev_life = info.get('life',prev_life)
+    #prev_score = info.get('score', 0)
 
     prev_y = info.get('y_pos', 79)  # Track y position for jump detection
     stuck_counter = 0  # Count consecutive steps with no progress
@@ -156,7 +191,6 @@ for episode in range(EPISODES):
     was_stuck_prev_step = False  # Track if we were stuck in previous step
     
     # Track jump sequences for better rewards
-    jump_sequence = []  # Track recent jump actions
     max_y_reached = prev_y  # Track maximum y position (lowest y value = highest jump)
     steps_at_ground = 0  # Count steps at ground level
     last_jump_action = None  # Track last jump action taken
@@ -223,14 +257,15 @@ for episode in range(EPISODES):
         
         action = select_action(state, policy_net, exploration_epsilon, env, device, encourage_high_jump=encourage_jump)
         next_obs, reward, terminated, truncated, info = env.step(action)
-        next_frame = preprocess(next_obs)
-        state_stack.append(next_frame)
-        next_state = np.array(state_stack, dtype=np.float32)
+        next_state = preprocess(next_obs)
+        state_stack.append(next_state)
+        next_state = np.array(state_stack)
+        
         done = terminated or truncated
 
         # --- Reward Shaping ---
         x_progress = info.get('x_pos', prev_x) - prev_x
-        score_gain = info.get('score', prev_score) - prev_score
+        #score_gain = info.get('score', prev_score) - prev_score
         y_pos = info.get('y_pos', prev_y)
         y_change = prev_y - y_pos  # Positive when Mario goes up (jumps)
         current_x = info.get('x_pos', prev_x)
@@ -247,12 +282,7 @@ for episode in range(EPISODES):
         # Track maximum y reached (lower y = higher jump)
         if y_pos < max_y_reached:
             max_y_reached = y_pos
-        
-        # Track jump sequences (keep last 5 actions)
-        jump_sequence.append(action)
-        if len(jump_sequence) > 5:
-            jump_sequence.pop(0)
-        
+                
         # Detect if at ground level (y_pos around 79)
         is_at_ground = y_pos >= 77
         if is_at_ground:
@@ -287,25 +317,25 @@ for episode in range(EPISODES):
         # ===== IMPROVED REWARD SYSTEM =====
         
         # 1. HIGH JUMP ACTION REWARD (always reward high jumps, more when needed)
-        jump_bonus = 0.0
-        power_jump_bonus = 0.0
-        if action == 2:  # Normal jump (right + A)
-            jump_bonus = 3.0  # Base reward for normal jump
-            if approaching_obstacle or is_stuck_for_reward:
-                jump_bonus = 10.0  # Higher when approaching obstacle
-            last_jump_action = 2
-        elif action == 4:  # HIGH JUMP (right + A + B) - THIS IS KEY!
-            jump_bonus = 50.0  # ALWAYS reward high jump significantly
-            if approaching_obstacle:
-                jump_bonus *= 2.0 #= 20.0  # Very high when approaching obstacle
-            if is_stuck_for_reward:
-                jump_bonus *= 5.0  # Maximum when stuck
-            last_jump_action = 4
-            high_jump_count += 1
-            if step % 20 == 0:  # Print occasionally
-                print(f"🦘 HIGH JUMP! Reward: {jump_bonus:.1f} (stuck: {stuck_counter}, obstacle: {approaching_obstacle})")
-            if y_change > 4:
-                power_jump_bonus = 5.0 + y_change * 1.5  # Bonus for strong upward motion
+        #jump_bonus = 0.0
+        #power_jump_bonus = 0.0
+        #if action == 2:  # Normal jump (right + A)
+        #    jump_bonus = 3.0  # Base reward for normal jump
+        #    if approaching_obstacle or is_stuck_for_reward:
+        #        jump_bonus = 10.0  # Higher when approaching obstacle
+        #    last_jump_action = 2
+        #elif action == 4:  # HIGH JUMP (right + A + B) - THIS IS KEY!
+        #    jump_bonus = 50.0  # ALWAYS reward high jump significantly
+        #    if approaching_obstacle:
+        #        jump_bonus *= 2.0 #20.0  # Very high when approaching obstacle
+        #    if is_stuck_for_reward:
+        #        jump_bonus *= 5.0 #25.0  # Maximum when stuck
+        #    last_jump_action = 4
+        #    high_jump_count += 1
+        #    if step % 20 == 0:  # Print occasionally
+        #        print(f"🦘 HIGH JUMP! Reward: {jump_bonus:.1f} (stuck: {stuck_counter}, obstacle: {approaching_obstacle})")
+        #    if y_change > 4:
+        #        power_jump_bonus = 5.0 + y_change * 1.5  # Bonus for strong upward motion
         
         # 2. JUMP HEIGHT REWARD (reward for actual jump height)
         jump_height_bonus = 0.0
@@ -315,108 +345,121 @@ for episode in range(EPISODES):
             if y_change > 5:
                 jump_height_bonus += 10.0  # Bonus for high jumps
             if y_change > 8:  # Very high jump
-                jump_height_bonus += 15.0  # Extra bonus for very high jumps
+                jump_height_bonus += 50.0  # Extra bonus for very high jumps
                 print(f"🚀 VERY HIGH JUMP! Height change: {y_change:.1f}, Bonus: {jump_height_bonus:.1f}")
         
         # 3. MAINTAINING JUMP STATE REWARD (reward for staying in air)
-        air_time_bonus = 0.0
-        air_chain_bonus = 0.0
-        if not is_at_ground:  # Mario is in the air
-            # Reward being in the air, especially at higher positions
-            height_bonus = (79 - y_pos) * 0.5  # Reward being higher up
-            air_time_bonus = 1.0 + height_bonus  # Base reward + height bonus
-            # Extra reward if we recently did a high jump
-            if last_jump_action == 4:
-                air_time_bonus *= 2.0  # Double reward for high jump air time
-            air_chain_bonus = current_air_chain * 0.3  # Encourage staying airborne longer
+        #air_time_bonus = 0.0
+        #air_chain_bonus = 0.0
+        #if not is_at_ground:  # Mario is in the air
+        #    # Reward being in the air, especially at higher positions
+        #    height_bonus = (79 - y_pos) * 0.5  # Reward being higher up
+        #    air_time_bonus = 1.0 + height_bonus  # Base reward + height bonus
+        #    # Extra reward if we recently did a high jump
+        #    if last_jump_action == 4:
+        #        air_time_bonus *= 2.0  # Double reward for high jump air time
+        #    air_chain_bonus = current_air_chain * 0.3  # Encourage staying airborne longer
         
         # 4. PROGRESS AFTER JUMP REWARD (reward progress made after jumping)
-        post_jump_progress_bonus = 0.0
-        if last_jump_action in [2, 4] and x_progress > 0:
-            # Reward progress made after a jump
-            multiplier = 3.0 if last_jump_action == 4 else 2.0  # Higher for high jump
-            post_jump_progress_bonus = x_progress * multiplier
-            if last_jump_action == 4 and x_progress > 2:
-                post_jump_progress_bonus += 10.0  # Extra for clearing obstacle with high jump
-                print(f"✅ Progress after HIGH JUMP: {x_progress:.1f}, Bonus: {post_jump_progress_bonus:.1f}, pure_progress: {info.get('x_pos', 40)}")
+        #post_jump_progress_bonus = 0.0
+        #if last_jump_action in [2, 4] and x_progress > 0:
+        #    # Reward progress made after a jump
+        #    multiplier = 3.0 if last_jump_action == 4 else 2.0  # Higher for high jump
+        #    post_jump_progress_bonus = x_progress * multiplier
+        #    if last_jump_action == 4 and x_progress > 2:
+        #        post_jump_progress_bonus += 10.0  # Extra for clearing obstacle with high jump
+        #        print(f"✅ Progress after HIGH JUMP: {x_progress:.1f}, Bonus: {post_jump_progress_bonus:.1f}, Pure progress: {info.get('x_pos',40)}")
         
         # 5. PROGRESS & SPEED REWARD (favor fast forward motion)
         progress_reward = forward_velocity * forward_velocity #* 2.5  # Stronger weight for moving forward
-        #print(f"forward_velocity = {forward_velocity}")
         #sprint_bonus = 0.0
         #if forward_velocity >= 3.0:
         #    sprint_bonus = 5.0  # Extra reward for rapid movement
         #elif forward_velocity >= 1.0:
-        #    sprint_bonus = 2.0
-        speed_chain_bonus = speed_chain * 0.4  # Encourage sustained progress
-        slow_penalty = 0.0
-        if no_progress_steps > SLOW_PENALTY_DELAY and is_at_ground:
-            slow_penalty = -min(
-                MAX_SLOW_PENALTY,
-                (no_progress_steps - SLOW_PENALTY_DELAY) * 0.2,
-            )  # Penalize lingering on the ground before stuck logic kicks in
+        #   sprint_bonus = 2.0
+        #speed_chain_bonus = speed_chain * 0.4  # Encourage sustained progress
+        #slow_penalty = 0.0
+        #if no_progress_steps > SLOW_PENALTY_DELAY and is_at_ground:
+        #    slow_penalty = -min(
+        #        MAX_SLOW_PENALTY,
+        #        (no_progress_steps - SLOW_PENALTY_DELAY) * 0.2,
+        #    )  # Penalize lingering on the ground before stuck logic kicks in
         
         # 6. OBSTACLE CLEARING BONUS (reward for clearing obstacles)
-        obstacle_clear_bonus = 0.0
-        if approaching_obstacle or is_stuck_for_reward:
-            if y_pos < 75:  # Mario is high up (jumping over something)
-                obstacle_clear_bonus = 5.0  # Reward for being high when near obstacle
-            if x_progress > 0 and y_pos < 75:  # Making progress while high
-                obstacle_clear_bonus = 15.0  # Large reward for clearing obstacle
-                print(f"🏆 OBSTACLE CLEARED! Progress: {x_progress:.1f}, Height: {y_pos:.1f}")
+        #obstacle_clear_bonus = 0.0
+        #if approaching_obstacle or is_stuck_for_reward:
+        #    if y_pos < 75:  # Mario is high up (jumping over something)
+        #        obstacle_clear_bonus = 5.0  # Reward for being high when near obstacle
+        #    if x_progress > 0 and y_pos < 75:  # Making progress while high
+        #        obstacle_clear_bonus = 15.0  # Large reward for clearing obstacle
+        #        print(f"🏆 OBSTACLE CLEARED! Progress: {x_progress:.1f}, Height: {y_pos:.1f}")
         
         # 7. UNSTUCK BONUS (large reward for breaking out of stuck state)
-        unstuck_bonus = 0.0
-        # Check if we were stuck before update and now making progress
-        if was_stuck_before_update and x_progress > 0:  # Was stuck, now making progress
-            unstuck_bonus = 50.0  # Increased from 30.0 to 50.0
-            # Extra bonus if high jump was used
-            if last_jump_action == 4:
-                unstuck_bonus += 25.0  # Extra for high jump unstuck
-            print(f"🎉 UNSTUCK! Progress: {x_progress:.1f} (was stuck, jump: {last_jump_action})")
+        #unstuck_bonus = 0.0
+        ### Check if we were stuck before update and now making progress
+        #if was_stuck_before_update and x_progress > 0:  # Was stuck, now making progress
+        #    unstuck_bonus = 50.0  # Increased from 30.0 to 50.0
+        #    # Extra bonus if high jump was used
+        #    if last_jump_action == 4:
+        #        unstuck_bonus += 25.0  # Extra for high jump unstuck
+        #    print(f"🎉 UNSTUCK! Progress: {x_progress:.1f} (was stuck, jump: {last_jump_action})")
         
         # 8. PREVENTIVE JUMP REWARD (reward jumping before getting stuck)
-        preventive_jump_bonus = 0.0
-        if approaching_obstacle and action in [2, 4]:
-            preventive_jump_bonus = 5.0 if action == 2 else 10.0  # Reward preventive jumping
-            if action == 4:
-                print(f"🛡️  Preventive HIGH JUMP! (before getting stuck)")
+        #preventive_jump_bonus = 0.0
+        #if approaching_obstacle and action in [2, 4]:
+        #    preventive_jump_bonus = 10.0 if action == 2 else 100.0  # Reward preventive jumping
+        #    if action == 4:
+        #        print(f"🛡️  Preventive HIGH JUMP! (before getting stuck)")
         
-        # 9. SURVIVAL BONUS (small reward for staying alive)
-        survival_bonus = 0.1 if x_progress > 0 else 0.0
+        ## 9. SURVIVAL BONUS (small reward for staying alive)
+        #survival_bonus = 0.1 if x_progress > 0 else 0.0
 
-        #10. PURE PROGRESSMENT BONUS
+        # 10 PURE PROGRESSMENT BONUS
         pure_progress_bonus = 0.0
-        if x_progress > 0:
-            pure_progress_bonus = 0.5 * info.get("x_pos",40)
+        if x_progress > 0.0:
+            pure_progress_bonus = 0.5 * info.get('x_pos', 40)
+
+        ## 11. DEATH REWARD
+        death_penalty = 0.0
+        current_life = info.get('life',prev_life)
+        if current_life < prev_life:
+            death_penalty = -500.0
+            print(f"💀 RIP Mario, current_life = {current_life}, prev_life = {prev_life}")
+        prev_life = current_life
+
+        # 12 FLAG REWARD
+        flag_reward = 0.0
+        if info.get('flag_get'):
+            flag_reward = 1000.0
+            print(f"🏁 Flag reached!!!🥳🥳🥳")
         
         # Combine all rewards
         shaped_reward = (reward + 
                 progress_reward + 
                 #sprint_bonus + 
-                speed_chain_bonus + 
-                slow_penalty + 
-                        0.05 * score_gain + 
-                        jump_bonus + 
+                #speed_chain_bonus + 
+                #slow_penalty + 
+                        #0.05 * score_gain + 
+                        #jump_bonus + 
                         jump_height_bonus + 
-                        air_time_bonus + 
-                air_chain_bonus + 
-                power_jump_bonus + 
-                        post_jump_progress_bonus + 
-                        obstacle_clear_bonus + 
-                        unstuck_bonus + 
-                        preventive_jump_bonus + 
-                        survival_bonus +
-                pure_progress_bonus
+                        #air_time_bonus + 
+                #air_chain_bonus + 
+                #power_jump_bonus + 
+                        #post_jump_progress_bonus + 
+                        #obstacle_clear_bonus + 
+                        #unstuck_bonus + 
+                #        preventive_jump_bonus + 
+                        #survival_bonus +
+                pure_progress_bonus +
+                death_penalty + 
+                flag_reward
                 )
-
-        #print(f"shaped rewared = {shaped_reward}")
-
-
 
         # --- Death Penalty ---
         if terminated:
-            shaped_reward -= 500.0
+             shaped_reward -= 500.0
+        #    print(f"💀 RIP Mario")
+
         
         # --- Stuck Penalty (escalating penalty the longer stuck) ---
         stuck_penalty = 0.0
@@ -438,7 +481,7 @@ for episode in range(EPISODES):
         
         prev_x = info.get('x_pos', prev_x)
         prev_y = info.get('y_pos', prev_y)
-        prev_score = info.get('score', prev_score)
+        #prev_score = info.get('score', prev_score)
         
         # Reset max_y_reached if back on ground
         if is_at_ground and steps_at_ground > 10:
@@ -468,9 +511,17 @@ for episode in range(EPISODES):
         action_name = action_names.get(action, f"UNK({action})")
         # Re-check is_stuck after updating stuck_counter
         is_stuck_now = stuck_counter > STUCK_THRESHOLD
-        if step % 100 == 0 or (is_stuck_now and step % 20 == 0):  # Print every 100 steps, or every 20 when stuck
-            stuck_info = f" [STUCK: {stuck_counter} steps]" if is_stuck_now else ""
-            print(f"Episode {episode} — Step {step} — Action: {action_name}({action}) — Reward: {shaped_reward:.2f} — x_pos: {current_x} — y_pos: {y_pos} — Progress: {x_progress}{stuck_info}")
+        if step % METRIC_STEP_LOG_INTERVAL == 0:
+            avg_speed_so_far = episode_forward_progress / max(step + 1, 1)
+            print(
+                f"📊 Episode {episode} — Step {step} — Action: {action_name}({action}) "
+                f"— Total Reward: {total_reward:.2f} — Avg Speed: {avg_speed_so_far:.2f} "
+                f"— Epsilon: {exploration_epsilon:.3f} — x_pos: {current_x}"
+            )
+        if is_stuck_now and step % STUCK_METRIC_LOG_INTERVAL == 0:
+            print(
+                f"⚠️  Episode {episode} — Step {step} — STUCK for {stuck_counter} steps (x_pos: {current_x})"
+            )
 
         if done or step >= MAX_STEPS - 1:
             if current_air_chain > max_air_chain:
@@ -506,6 +557,34 @@ for episode in range(EPISODES):
                     elapsed=elapsed,
                 )
             )
+
+            episode_metrics_record = {
+                "episode": episode + 1,
+                "total_reward": round(total_reward, 4),
+                "avg_reward_per_step": round(avg_reward, 4),
+                "forward_progress": round(episode_forward_progress, 4),
+                "avg_speed": round(avg_speed, 4),
+                "avg_loss": round(avg_loss, 6),
+                "epsilon": round(epsilon, 4),
+                "stuck_termination": int(terminated_due_to_stuck),
+            }
+            metrics_history["reward"].append(total_reward)
+            metrics_history["forward_progress"].append(episode_forward_progress)
+            metrics_history["avg_speed"].append(avg_speed)
+            metrics_history["air_steps"].append(air_time_steps)
+            metrics_history["high_jumps"].append(high_jump_count)
+            metrics_history["max_air_chain"].append(max_air_chain)
+            metrics_history["avg_loss"].append(avg_loss)
+            metrics_history["epsilon"].append(epsilon)
+            metrics_history["stuck_termination"].append(int(terminated_due_to_stuck))
+            append_metrics_csv(episode_metrics_record)
+
+            if (episode + 1) % 25 == 0 or episode == EPISODES - 1:
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                svg_path = os.path.join("assets", f"{timestamp}_metrics_chart.svg")
+                plot_rewards(metrics_history, svg_path)
+                print(f"📈 Rolling metric chart saved to {svg_path}")
+
             break
 
     # --- Save Best Model with Timestamp ---
@@ -516,14 +595,14 @@ for episode in range(EPISODES):
         torch.save(policy_net.state_dict(), best_model_path)
         print(f"💾 New best model saved: {best_model_path} with reward {best_reward:.2f}")
         try:
-            with open(BEST_REWARD_PATH, "w") as reward_file:
-                reward_file.write(str(best_reward))
+            reward_file = open(BEST_REWARD_PATH, "w")
+            reward_file.write(str(best_reward))
+            reward_file.close()
         except Exception as e:
-            print(f"⚠️  Could not write best score to file: {e}")
-            
+            print("Could not write best score to file.")
+
 
     # --- Epsilon Decay ---
-    epsilon_history.append(epsilon)
     epsilon = max(EPS_END, epsilon * EPS_DECAY)
 
     # --- Target Network Update ---
@@ -534,17 +613,6 @@ for episode in range(EPISODES):
     if episode % 50 == 0:
         torch.save(policy_net.state_dict(), SAVE_PATH)
 
-    steps_recorded = min(step + 1, MAX_STEPS)
-    avg_speed_episode = episode_forward_progress / max(steps_recorded, 1)
-    avg_loss_episode = episode_loss_total / max(loss_updates, 1)
-    forward_progress_history.append(episode_forward_progress)
-    avg_speed_history.append(avg_speed_episode)
-    air_steps_history.append(air_time_steps)
-    high_jump_history.append(high_jump_count)
-    max_air_chain_history.append(max_air_chain)
-    loss_history.append(avg_loss_episode)
-    reward_history.append(total_reward)
-    stuck_termination_history.append(1 if terminated_due_to_stuck else 0)
 
 # --- Finalize ---
 if viewer is not None:
@@ -554,19 +622,6 @@ if video_enabled and video is not None:
     video.release()
     print(f"📹 Video saved to {VIDEO_PATH}")
 env.close()
-plot_rewards(
-    {
-        "reward": reward_history,
-        "forward_progress": forward_progress_history,
-        "avg_speed": avg_speed_history,
-        "air_steps": air_steps_history,
-        "high_jumps": high_jump_history,
-        "max_air_chain": max_air_chain_history,
-        "avg_loss": loss_history,
-        "epsilon": epsilon_history,
-        "stuck_termination": stuck_termination_history,
-    },
-    REWARD_PLOT_PATH,
-)
-print(f"📉 Episodes ending due to stuck detection: {sum(stuck_termination_history)}")
+plot_rewards(metrics_history, REWARD_PLOT_PATH)
+print(f"📉 Episodes ending due to stuck detection: {sum(metrics_history['stuck_termination'])}")
 print(f"🏁 Training complete. Reward plot saved to {REWARD_PLOT_PATH}")

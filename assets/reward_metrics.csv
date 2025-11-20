@@ -1,0 +1,4 @@
+episode,total_reward,avg_reward_per_step,forward_progress,avg_speed,avg_loss,epsilon,stuck_termination
+2,173617.0,125.8094,1639.0,1.1877,17484.816531,0.995,0
+3,366632.0,112.8098,2874.0,0.8843,24760.797025,0.99,0
+2,313470.5,287.5876,1618.0,1.4844,21195.915194,0.995,0

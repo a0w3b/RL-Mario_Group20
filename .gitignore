@@ -41,6 +41,8 @@ Thumbs.db
 # Generated files and folders
 GUIDE.md
 EHDOTUKSET.md
+TODO.md
+CHANGE_LOG.md
 *.pdf
 /OLD
 /checkpoints

@@ -47,11 +47,13 @@ Welcome to the UNI-Vaasa Applied ML / Group20 "RL-Mario" project. This document 
      - `SLOW_PENALTY_DELAY`, `MAX_SLOW_PENALTY`: penalize loitering on the ground, pushing the agent to move or jump; tune these to balance patience vs. urgency.
      - `SPRINT_SPEED_LOW/HIGH`: boundaries for awarding sprint bonuses to forward velocity; tighten/loosen depending on how aggressive you want forward motion incentives to be.
      - `GRAD_CLIP_NORM`: clips gradients to keep updates stable when rewards spike.
+    - Additional shaping hooks (jump bonuses, air-time rewards, sprint bonuses, unstuck incentives, obstacle clears, preventive jumps, survival bonuses) are intentionally commented out in `train.py`. Toggle them back on when you want to experiment with richer signals without deleting the scaffolding.
   3. **Checkpoint & Visualization:** `SAVE_PATH`, `VIDEO_PATH`, `REWARD_PLOT_PATH`, `SHOW_VISUAL`, `DISPLAY_*` flags control artifacts and live display. Disable visuals when training headless to avoid pygame overhead.
+  4. **Telemetry & Diagnostics:** Training now records per-episode reward, forward progress, average speed, average loss, epsilon, and stuck-termination flags into an in-memory history and appends them to `assets/reward_metrics.csv`. `plot_rewards` still writes `assets/reward_plot.png`, and every 25 episodes (and on the final episode) a timestamped multi-panel SVG dashboard (e.g., `assets/20251120-153000_metrics_chart.svg`) is emitted so you can quickly inspect trendlines mid-run. Console noise is controlled via `METRIC_STEP_LOG_INTERVAL` (default 100 steps) and `STUCK_METRIC_LOG_INTERVAL` (default 20 steps while stuck), providing lightweight progress pulses without spamming stdout.
 - **Runtime Flow:**
   1. Builds Mario environment, policy/target networks, optimizer, replay buffer, and optional display/video writers.
   2. Optionally resumes from the latest `checkpoints/best_model_*.pt` or `checkpoints/dqn_mario.pt`.
-  3. For each episode and each step: render frame (if needed), compute exploration epsilon (boosting when stuck), pick action via `select_action`, step the env, apply extensive reward shaping (progress, jump height/duration, unstuck bonuses, slow penalties, survival rewards), store transition, and train once replay buffer has enough samples.
+  3. For each episode and each step: render frame (if needed), compute exploration epsilon (boosting when stuck), pick action via `select_action`, step the env, apply extensive reward shaping (progress, jump height/duration, optional bonuses), store transition, and train once the replay buffer has enough samples.
   4. Logs rich per-episode stats (reward, x_pos, avg speed, jump counts, stuck detections) and saves the best-performing checkpoint with timestamps.
   5. After training, closes resources and calls `plot_rewards` to generate the multi-metric dashboard.
 - **How Hyperparameters Affect Behavior:**
@@ -110,6 +112,7 @@ Welcome to the UNI-Vaasa Applied ML / Group20 "RL-Mario" project. This document 
 - When altering `utils.preprocess` or the network architecture, update both `agent.py` and any scripts feeding frames to the model.
 - Keep `eval.py` in sync with `train.py` environment settings (action space, preprocessing) to ensure evaluation represents true policy behavior.
 - If you do not need real-time visualization, set `SHOW_VISUAL = False` to avoid pygame overhead or crashes on headless servers.
+- Many optional reward-shaping helpers (high-jump bonuses, air-time bonuses, obstacle rewards, sprint/slow penalties, unstuck bonuses, etc.) remain in `train.py` but are commented out to keep the signal lean while debugging. Re-enable any block by uncommenting it; most terms are still wired into the `shaped_reward` calculation, so you only need to restore the snippet you care about before experimenting.
 
 With this guide, newcomers can quickly identify where core logic lives, how files interact, and which knobs to turn when experimenting with the Mario agent. Happy training!
 
